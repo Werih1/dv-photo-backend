@@ -1,169 +1,168 @@
+// ============================================
+// dv-photo-backend/routes/payments.js
+// API ЭНДПОИНТЫ ДЛЯ ПЛАТЕЖЕЙ
+// ============================================
+
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
+const sqlite3 = require('sqlite3').verbose();
+const { TARIFFS } = require('../bot');
 
-// Цены тарифов в звёздах
-const PLAN_PRICES = {
-  'LITE': 1,      // Для тестирования (потом 100)
-  'MAX': 1,       // Для тестирования (потом 500)
-  'ULTRA': 1      // Для тестирования (потом 2500)
-};
+const db = new sqlite3.Database(process.env.DATABASE_PATH || './db/users.db');
 
-const PLAN_DESCRIPTIONS = {
-  'LITE': 'Тариф LITE - 10 проверок фото для DV-Lottery',
-  'MAX': 'Тариф MAX - Безлимит на 48 часов для DV-Lottery',
-  'ULTRA': 'Тариф ULTRA - Безлимит на 6 месяцев для DV-Lottery'
-};
+// ============ POST /api/payments/send-invoice ============
+// Вызывается из Web App при нажатии "Купить"
+// Отправляет инвойс пользователю
 
-// ===== POST /api/payments/send-invoice =====
-// Получает данные от фронтенда (Web App) и отправляет счет пользователю
 router.post('/send-invoice', async (req, res) => {
   try {
-    const { telegram_id, plan } = req.body;
-    console.log(`🛒 Запрос на платёж: user=${telegram_id}, plan=${plan}`);
+    const { telegram_id, tariff } = req.body;
 
-    // Проверяем что план существует
-    if (!PLAN_PRICES[plan]) {
+    console.log(`📦 Send invoice request: user=${telegram_id}, tariff=${tariff}`);
+
+    if (!TARIFFS[tariff]) {
       return res.status(400).json({
         ok: false,
-        error: `Неизвестный тариф: ${plan}`
+        error: `Unknown tariff: ${tariff}`,
       });
     }
 
-    const price = PLAN_PRICES[plan];
-    const description = PLAN_DESCRIPTIONS[plan];
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
-
     if (!botToken) {
-      console.error('❌ TELEGRAM_BOT_TOKEN не установлен в .env');
+      console.error('❌ TELEGRAM_BOT_TOKEN not set');
       return res.status(500).json({
         ok: false,
-        error: 'Ошибка конфигурации сервера'
+        error: 'Server configuration error',
       });
     }
 
-    // Формируем данные инвойса для Telegram API
-    const invoiceData = {
-      chat_id: telegram_id,
-      title: `DV-Lottery Photo Check - ${plan}`,
-      description: description,
-      payload: `plan_${plan}_${telegram_id}_${Date.now()}`,
-      currency: 'XTR', // XTR = Telegram Stars
-      prices: [
-        {
-          label: `${plan} Subscription`,
-          amount: price
-        }
-      ]
-    };
+    // Инвойс будет отправлен через bot.js (обработчик buy_ callback)
+    // Этот endpoint просто логирует запрос и подтверждает получение
 
-    console.log(`📤 Отправляем инвойс: ${JSON.stringify(invoiceData)}`);
-
-    // Отправляем счет через Telegram Bot API
-    const response = await axios.post(
-      `https://api.telegram.org/bot${botToken}/sendInvoice`,
-      invoiceData
-    );
-
-    if (response.data.ok) {
-      console.log(`✅ Инвойс успешно отправлен пользователю ${telegram_id}`);
-      return res.json({
-        ok: true,
-        message: 'Invoice sent successfully',
-        invoice_id: response.data.result.message_id
-      });
-    } else {
-      console.error(`❌ Ошибка Telegram API: ${response.data.description}`);
-      return res.status(400).json({
-        ok: false,
-        error: response.data.description
-      });
-    }
-  } catch (error) {
-    console.error(`❌ Ошибка при отправке инвойса: ${error.message}`);
-    res.status(500).json({
-      ok: false,
-      error: error.message
-    });
-  }
-});
-
-// ===== POST /api/payments/webhook =====
-// Основной вебхук для обработки обновлений от Telegram (polling)
-router.post('/webhook', async (req, res) => {
-  try {
-    const update = req.body;
-
-    console.log(`📨 Webhook получен:`, JSON.stringify(update, null, 2));
-
-    // Проверяем это ли успешный платёж
-    if (update.message && update.message.successful_payment) {
-      const payment = update.message.successful_payment;
-      const user_id = update.message.from.id;
-      const payload = payment.invoice_payload;
-
-      console.log(`✅ Webhook: Платёж получен от ${user_id}`);
-      console.log(` Payload: ${payload}`);
-      console.log(` Amount: ${payment.total_amount} ${payment.currency}`);
-
-      // Извлекаем название плана из payload
-      // Формат payload: plan_LITE_123456_1703001234
-      const parts = payload.split('_');
-      const plan = parts[1];
-
-      // === АКТИВИРУЕМ ТАРИФ ===
-      console.log(`💾 Активируем тариф ${plan} для пользователя ${user_id}`);
-
-      // TODO: Добавьте здесь сохранение в БД:
-      // await User.updateOne(
-      //   { telegram_id: user_id },
-      //   {
-      //     subscription: plan,
-      //     subscription_date: new Date(),
-      //     subscription_active: true
-      //   }
-      // );
-
-      // Обязательно возвращаем успешный ответ Telegram
-      res.json({ ok: true });
-    } else {
-      res.json({ ok: true }); // Игнорируем остальные обновления
-    }
-  } catch (error) {
-    console.error(`❌ Ошибка в webhook: ${error.message}`);
-    res.status(500).json({ ok: false, error: error.message });
-  }
-});
-
-// ===== POST /api/payments/success =====
-// Альтернативный endpoint - если фронтенд сообщает об успешном платеже
-router.post('/success', async (req, res) => {
-  try {
-    const { telegram_id, plan, amount, payload } = req.body;
-
-    console.log(`✅ ПЛАТЁЖ УСПЕШЕН!`);
-    console.log(` User: ${telegram_id}`);
-    console.log(` Plan: ${plan}`);
-    console.log(` Amount: ${amount} XTR`);
-
-    // === ЗДЕСЬ ДОБАВЛЯЕМ ЛОГИКУ АКТИВАЦИИ ТАРИФА ===
-    // Сохраняем информацию о покупке в БД
-    // Примеры:
-    // 1. await User.updateOne({ telegram_id }, { subscription: plan, ... })
-    // 2. await Subscription.create({ telegram_id, plan, amount, date: new Date() })
-
-    console.log(`💾 Сохраняем подписку в БД: ${telegram_id} -> ${plan}`);
-
-    // Отправляем успешный ответ
     res.json({
       ok: true,
-      message: `Тариф ${plan} активирован`
+      message: `Invoice request accepted for ${tariff}`,
+      tariff: tariff,
     });
   } catch (error) {
-    console.error(`❌ Ошибка при обработке платежа: ${error.message}`);
+    console.error('❌ send-invoice error:', error.message);
     res.status(500).json({
       ok: false,
-      error: error.message
+      error: error.message,
+    });
+  }
+});
+
+// ============ GET /api/payments/history/:telegram_id ============
+// Получить историю платежей пользователя
+
+router.get('/history/:telegram_id', async (req, res) => {
+  try {
+    const { telegram_id } = req.params;
+
+    const history = await new Promise((resolve, reject) => {
+      db.all(
+        'SELECT * FROM payment_history WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 20',
+        [telegram_id],
+        (err, rows) => {
+          if (err) reject(err);
+          else resolve(rows || []);
+        }
+      );
+    });
+
+    res.json({
+      ok: true,
+      data: history,
+    });
+  } catch (error) {
+    console.error('❌ history error:', error.message);
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// ============ GET /api/payments/tariffs ============
+// Получить список доступных тарифов с ценами
+
+router.get('/tariffs', async (req, res) => {
+  try {
+    const tariffs = [];
+
+    for (const [key, data] of Object.entries(TARIFFS)) {
+      tariffs.push({
+        code: key,
+        name_en: data.name_en,
+        name_ru: data.name_ru,
+        description_en: data.description_en,
+        description_ru: data.description_ru,
+        price: data.price,
+        currency: 'XTR',
+        checks:
+          data.checks === 999 || data.checks === 9999
+            ? 'unlimited'
+            : data.checks,
+        duration_seconds: data.duration,
+      });
+    }
+
+    res.json({
+      ok: true,
+      data: tariffs,
+    });
+  } catch (error) {
+    console.error('❌ tariffs error:', error.message);
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// ============ GET /api/payments/subscription/:telegram_id ============
+// Получить информацию об активной подписке
+
+router.get('/subscription/:telegram_id', async (req, res) => {
+  try {
+    const { telegram_id } = req.params;
+
+    const subscription = await new Promise((resolve, reject) => {
+      db.get(
+        'SELECT * FROM subscriptions WHERE telegram_id = ? AND status = ? ORDER BY purchased_at DESC LIMIT 1',
+        [telegram_id, 'active'],
+        (err, row) => {
+          if (err) reject(err);
+          else resolve(row);
+        }
+      );
+    });
+
+    if (!subscription) {
+      return res.json({
+        ok: true,
+        data: null,
+        message: 'No active subscription',
+      });
+    }
+
+    res.json({
+      ok: true,
+      data: {
+        id: subscription.id,
+        tariff: subscription.tariff,
+        checks_remaining: subscription.checks_remaining,
+        expires_at: subscription.expires_at,
+        purchased_at: subscription.purchased_at,
+        transaction_id: subscription.transaction_id,
+      },
+    });
+  } catch (error) {
+    console.error('❌ subscription error:', error.message);
+    res.status(500).json({
+      ok: false,
+      error: error.message,
     });
   }
 });
