@@ -1,35 +1,80 @@
+// ============================================
+// dv-photo-backend/server.js
+// ОБНОВЛЕННЫЙ ГЛАВНЫЙ СЕРВЕР
+// ============================================
+
 const express = require('express');
-const mongoose = require('mongoose');
-require('dotenv').config();
+const cors = require('cors');
+const dotenv = require('dotenv');
+const { bot } = require('./bot');
+
+dotenv.config();
 
 const app = express();
 
-// Middleware
-app.use(express.json());
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', process.env.APP_URL);
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  next();
+// ============ MIDDLEWARE ============
+
+app.use(express.json({ limit: '50mb' }));
+app.use(cors({
+  origin: process.env.APP_URL || '*',
+  credentials: true,
+}));
+
+// ============ TELEGRAM BOT WEBHOOK (для продакшена) ============
+
+// Если используете webhook (вместо polling)
+const TELEGRAM_WEBHOOK_PATH = `/bot${process.env.TELEGRAM_BOT_TOKEN}`;
+
+app.post(TELEGRAM_WEBHOOK_PATH, (req, res) => {
+  bot.handleUpdate(req.body, res);
 });
 
-// MongoDB подключение
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch(err => console.error('❌ MongoDB error:', err));
+// ============ API ROUTES ============
 
-// Routes
+// User routes
 app.use('/api/user', require('./routes/user'));
+
+// Payments routes
 app.use('/api/payments', require('./routes/payments'));
 
-// Test endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'Backend is running! 🚀' });
+// Telegram Bot webhook route (альтернативно)
+app.post('/api/webhook/telegram', (req, res) => {
+  bot.handleUpdate(req.body);
+  res.json({ ok: true });
 });
 
-// Server start
+// ============ HEALTH CHECK ============
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'Backend is running! 🚀',
+    timestamp: new Date().toISOString(),
+    bot: 'Telegram bot polling active',
+  });
+});
+
+// ============ SERVER START ============
+
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🤖 Bot token: ${process.env.TELEGRAM_BOT_TOKEN.slice(0, 10)}...`);
+  console.log(`📱 App URL: ${process.env.APP_URL}`);
 });
 
+// Запуск бота в режиме polling
+bot.launch({
+  polling: {
+    interval: 300,
+    timeout: 20,
+  },
+});
+
+console.log('✅ Telegram Bot polling started');
+
+// Graceful shutdown
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+module.exports = app;
