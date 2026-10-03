@@ -5,20 +5,23 @@
 
 const express = require('express');
 const router = express.Router();
-const sqlite3 = require('sqlite3').verbose();
-const { TARIFFS } = require('../bot');
+const { TARIFFS, isTariffListed } = require('../tariffs');
+const { all, resolveUserSubscription } = require('../db');
+const { createInvoiceLinkForUser } = require('../bot');
 
-const db = new sqlite3.Database(process.env.DATABASE_PATH || './db/users.db');
-
-// ============ POST /api/payments/send-invoice ============
-// Вызывается из Web App при нажатии "Купить"
-// Отправляет инвойс пользователю
-
-router.post('/send-invoice', async (req, res) => {
+async function createInvoiceResponse(req, res) {
   try {
-    const { telegram_id, tariff } = req.body;
+    const { telegram_id, tariff, lang } = req.body;
+    const language = lang === 'ru' ? 'ru' : 'en';
 
-    console.log(`📦 Send invoice request: user=${telegram_id}, tariff=${tariff}`);
+    console.log(`📦 Invoice link request: user=${telegram_id}, tariff=${tariff}`);
+
+    if (!telegram_id) {
+      return res.status(400).json({
+        ok: false,
+        error: 'telegram_id is required',
+      });
+    }
 
     if (!TARIFFS[tariff]) {
       return res.status(400).json({
@@ -36,40 +39,37 @@ router.post('/send-invoice', async (req, res) => {
       });
     }
 
-    // Инвойс будет отправлен через bot.js (обработчик buy_ callback)
-    // Этот endpoint просто логирует запрос и подтверждает получение
+    const invoice_url = await createInvoiceLinkForUser(telegram_id, tariff, language);
+    const tariffData = TARIFFS[tariff];
 
     res.json({
       ok: true,
-      message: `Invoice request accepted for ${tariff}`,
-      tariff: tariff,
+      invoice_url,
+      tariff,
+      price: tariffData.price,
+      currency: 'XTR',
+      expires_hint: tariffData.expiryType,
     });
   } catch (error) {
-    console.error('❌ send-invoice error:', error.message);
+    console.error('❌ create-invoice-link error:', error.message);
     res.status(500).json({
       ok: false,
       error: error.message,
     });
   }
-});
+}
 
-// ============ GET /api/payments/history/:telegram_id ============
-// Получить историю платежей пользователя
+router.post('/send-invoice', createInvoiceResponse);
+router.post('/create-invoice-link', createInvoiceResponse);
 
 router.get('/history/:telegram_id', async (req, res) => {
   try {
     const { telegram_id } = req.params;
 
-    const history = await new Promise((resolve, reject) => {
-      db.all(
-        'SELECT * FROM payment_history WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 20',
-        [telegram_id],
-        (err, rows) => {
-          if (err) reject(err);
-          else resolve(rows || []);
-        }
-      );
-    });
+    const history = await all(
+      'SELECT * FROM payment_history WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 20',
+      [telegram_id]
+    );
 
     res.json({
       ok: true,
@@ -84,14 +84,15 @@ router.get('/history/:telegram_id', async (req, res) => {
   }
 });
 
-// ============ GET /api/payments/tariffs ============
-// Получить список доступных тарифов с ценами
-
-router.get('/tariffs', async (req, res) => {
+router.get('/tariffs', async (_req, res) => {
   try {
     const tariffs = [];
 
     for (const [key, data] of Object.entries(TARIFFS)) {
+      if (!isTariffListed(data)) {
+        continue;
+      }
+
       tariffs.push({
         code: key,
         name_en: data.name_en,
@@ -100,11 +101,11 @@ router.get('/tariffs', async (req, res) => {
         description_ru: data.description_ru,
         price: data.price,
         currency: 'XTR',
-        checks:
-          data.checks === 999 || data.checks === 9999
-            ? 'unlimited'
-            : data.checks,
-        duration_seconds: data.duration,
+        checks: data.unlimited ? 'unlimited' : data.checks,
+        unlimited: data.unlimited,
+        expiry_type: data.expiryType,
+        duration_days: data.durationDays || null,
+        duration_seconds: data.durationDays ? data.durationDays * 24 * 60 * 60 : null,
       });
     }
 
@@ -121,23 +122,10 @@ router.get('/tariffs', async (req, res) => {
   }
 });
 
-// ============ GET /api/payments/subscription/:telegram_id ============
-// Получить информацию об активной подписке
-
 router.get('/subscription/:telegram_id', async (req, res) => {
   try {
     const { telegram_id } = req.params;
-
-    const subscription = await new Promise((resolve, reject) => {
-      db.get(
-        'SELECT * FROM subscriptions WHERE telegram_id = ? AND status = ? ORDER BY purchased_at DESC LIMIT 1',
-        [telegram_id, 'active'],
-        (err, row) => {
-          if (err) reject(err);
-          else resolve(row);
-        }
-      );
-    });
+    const subscription = await resolveUserSubscription(telegram_id);
 
     if (!subscription) {
       return res.json({
@@ -152,10 +140,13 @@ router.get('/subscription/:telegram_id', async (req, res) => {
       data: {
         id: subscription.id,
         tariff: subscription.tariff,
-        checks_remaining: subscription.checks_remaining,
+        checks_remaining: subscription.expired ? 0 : subscription.checks_remaining,
         expires_at: subscription.expires_at,
         purchased_at: subscription.purchased_at,
         transaction_id: subscription.transaction_id,
+        expired: subscription.expired,
+        unlimited: subscription.unlimited,
+        status: subscription.status,
       },
     });
   } catch (error) {
